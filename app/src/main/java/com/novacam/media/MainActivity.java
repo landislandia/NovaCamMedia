@@ -1,6 +1,8 @@
 package com.novacam.media;
 
 import android.Manifest;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
@@ -10,6 +12,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.MediaStore;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.RadioGroup;
@@ -164,15 +167,6 @@ public class MainActivity extends AppCompatActivity {
                 .putString("mediaType", "none")
                 .apply();
 
-        try {
-            File fallbackDir = getFallbackDir();
-            File fbVid = new File(fallbackDir, "virtual_source.mp4");
-            File fbImg = new File(fallbackDir, "virtual_source.jpg");
-            if (fbVid.exists()) fbVid.delete();
-            if (fbImg.exists()) fbImg.delete();
-        } catch (Throwable ignored) {
-        }
-
         saveSettings();
         refreshPreview();
     }
@@ -217,28 +211,63 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private File getFallbackDir() {
-        File dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM);
-        File dir = new File(dcim, "NovaCam");
+        File dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        File dir = new File(dl, "NovaCam");
         if (!dir.exists()) dir.mkdirs();
         return dir;
     }
 
+    private void writeToMediaStore(Uri collection, String relativeDir, String displayName, String mimeType, byte[] rawBytes, File sourceFile) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+        try {
+            ContentResolver resolver = getContentResolver();
+            resolver.delete(collection, MediaStore.MediaColumns.DISPLAY_NAME + "=?", new String[]{displayName});
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, displayName);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, mimeType);
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir);
+            Uri uri = resolver.insert(collection, values);
+            if (uri != null) {
+                try (OutputStream out = resolver.openOutputStream(uri)) {
+                    if (out != null) {
+                        if (rawBytes != null) {
+                            out.write(rawBytes);
+                        } else if (sourceFile != null) {
+                            try (InputStream in = new FileInputStream(sourceFile)) {
+                                byte[] buf = new byte[16384];
+                                int len;
+                                while ((len = in.read(buf)) > 0) out.write(buf, 0, len);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void syncFallbackPublicDirectory(File sourceInternal, boolean isVideo) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                ContentResolver r = getContentResolver();
+                r.delete(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, MediaStore.MediaColumns.DISPLAY_NAME + "=?", new String[]{"novacam_virtual_source.mp4"});
+                r.delete(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, MediaStore.MediaColumns.DISPLAY_NAME + "=?", new String[]{"novacam_virtual_source.jpg"});
+            } catch (Throwable ignored) {}
+
+            if (isVideo) {
+                writeToMediaStore(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, Environment.DIRECTORY_MOVIES + "/NovaCam", "novacam_virtual_source.mp4", "video/mp4", null, sourceInternal);
+            } else {
+                writeToMediaStore(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, Environment.DIRECTORY_PICTURES + "/NovaCam", "novacam_virtual_source.jpg", "image/jpeg", null, sourceInternal);
+            }
+        }
         try {
             File dir = getFallbackDir();
-            File oldVid = new File(dir, "virtual_source.mp4");
-            File oldImg = new File(dir, "virtual_source.jpg");
-            if (oldVid.exists()) oldVid.delete();
-            if (oldImg.exists()) oldImg.delete();
-
             File dest = new File(dir, isVideo ? "virtual_source.mp4" : "virtual_source.jpg");
             try (InputStream in = new FileInputStream(sourceInternal);
                  OutputStream out = new FileOutputStream(dest)) {
                 byte[] buf = new byte[16384];
                 int len;
-                while ((len = in.read(buf)) > 0) {
-                    out.write(buf, 0, len);
-                }
+                while ((len = in.read(buf)) > 0) out.write(buf, 0, len);
             }
         } catch (Throwable ignored) {
         }
@@ -254,10 +283,14 @@ public class MainActivity extends AppCompatActivity {
             json.put("mirrorHorizontal", prefs.getBoolean("mirrorHorizontal", false));
             json.put("autoMirrorFront", prefs.getBoolean("autoMirrorFront", true));
             json.put("scaleMode", prefs.getString("scaleMode", "CENTER_CROP"));
+            byte[] data = json.toString().getBytes(StandardCharsets.UTF_8);
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                writeToMediaStore(MediaStore.Downloads.EXTERNAL_CONTENT_URI, Environment.DIRECTORY_DOWNLOADS + "/NovaCam", "novacam_config.json", "application/json", data, null);
+            }
             File cfgFile = new File(getFallbackDir(), "config.json");
             try (FileOutputStream fos = new FileOutputStream(cfgFile)) {
-                fos.write(json.toString().getBytes(StandardCharsets.UTF_8));
+                fos.write(data);
             }
         } catch (Throwable ignored) {
         }
